@@ -391,9 +391,6 @@
 </footer>
 
 <script>
-  /* ══════════════════════════════════════════════════════════
-     ★ Apps Script 웹 앱 배포 후, 아래 URL을 교체하세요
-  ══════════════════════════════════════════════════════════ */
   const API_URL = 'https://script.google.com/macros/s/AKfycbyDDb5m-RStJhVSfNBsBfnNtHT7L-PVO1DcXGb-9LPN8Dh1NCvEdWmOJLoR7CKcocgj1A/exec';
 
   /* ── 꽃잎 생성 ── */
@@ -414,43 +411,40 @@
   let namesB = [];
   let isBusy = false;
 
-  /* ── 로딩 UI ── */
+  /* ── 로딩 UI (최초 1회만 사용) ── */
   function showLoading(){ document.getElementById('loading').classList.remove('hidden'); }
   function hideLoading(){ document.getElementById('loading').classList.add('hidden'); }
-  function setBusy(flag){
-    isBusy = flag;
-    ['a','b'].forEach(k => {
-      document.getElementById('btn-'+k).disabled = flag;
-      document.getElementById('input-'+k).disabled = flag;
-    });
+
+  /* ── 백그라운드 동기화 표시 (작은 텍스트) ── */
+  function setSyncStatus(msg){
+    document.getElementById('last-sync').textContent = msg;
   }
 
   /* ── GET: 명단 불러오기 ── */
-  async function fetchNames(){
-    showLoading();
+  async function fetchNames(silent = false){
+    if(!silent) showLoading();
     try {
-      const res  = await fetch(API_URL + '?t=' + Date.now()); // 캐시 방지
+      const res  = await fetch(API_URL + '?t=' + Date.now());
       const json = await res.json();
       if(!json.ok) throw new Error('서버 응답 오류');
       namesA = json.data.a || [];
       namesB = json.data.b || [];
       render();
       const now = new Date();
-      document.getElementById('last-sync').textContent =
-        `마지막 동기화 ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+      setSyncStatus(`마지막 동기화 ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`);
     } catch(e){
       console.error(e);
-      alert('명단을 불러오지 못했습니다.\nApps Script URL을 확인하거나 잠시 후 새로고침 해주세요.');
+      if(!silent) alert('명단을 불러오지 못했습니다.\n잠시 후 새로고침 해주세요.');
     } finally {
-      hideLoading();
+      if(!silent) hideLoading();
     }
   }
 
   /* ── POST: 추가/삭제 ── */
   async function postAction(action, name, stop){
-    const res  = await fetch(API_URL, {
+    const res = await fetch(API_URL, {
       method : 'POST',
-      headers: { 'Content-Type': 'text/plain' }, // Apps Script는 text/plain 권장
+      headers: { 'Content-Type': 'text/plain' },
       body   : JSON.stringify({ action, name, stop })
     });
     return res.json();
@@ -473,30 +467,28 @@
       el.innerHTML = '<span class="empty-hint">아직 신청자가 없습니다</span>';
       return;
     }
-    // name에 따옴표가 섞이는 걸 방지하기 위해 data-* 속성 사용
-    el.innerHTML = arr.map((name, i) => {
+    el.innerHTML = arr.map(name => {
       const safe = name.replace(/"/g,'&quot;');
       return `<span class="name-tag${key==='b'?' green':''}">
         ${name}
         <button class="del-btn" data-key="${key}" data-name="${safe}" title="취소">✕</button>
       </span>`;
     }).join('');
-    // 이벤트 위임
     el.querySelectorAll('.del-btn').forEach(btn => {
       btn.addEventListener('click', () => removeName(btn.dataset.key, btn.dataset.name));
     });
   }
 
-  /* ── 추가 ── */
+  /* ── 추가 (Optimistic UI) ── */
   async function addName(key){
     if(isBusy) return;
     const input = document.getElementById('input-'+key);
     const name  = input.value.trim();
     if(!name){ input.focus(); return; }
 
-    // 로컬 중복 체크
     const arr   = key === 'a' ? namesA : namesB;
     const other = key === 'a' ? namesB : namesA;
+
     if(arr.includes(name)){
       alert(`'${name}'님은 이미 ${key==='a'?'서구청':'성서홈플러스'} 명단에 있습니다.`);
       input.value = ''; input.focus(); return;
@@ -506,49 +498,78 @@
       if(!confirm(`'${name}'님이 이미 ${otherLabel} 명단에 있습니다.\n현재 장소로 변경하시겠습니까?`)){
         input.value = ''; return;
       }
+      // 로컬에서 반대편 즉시 제거
+      const otherArr = key === 'a' ? namesB : namesA;
+      const idx = otherArr.indexOf(name);
+      if(idx > -1) otherArr.splice(idx, 1);
     }
 
-    setBusy(true);
+    // ★ 즉시 화면 반영
+    arr.push(name);
     input.value = '';
-    showLoading();
+    render();
+    input.focus();
+
+    // 백그라운드 서버 전송
+    isBusy = true;
+    setSyncStatus('저장 중...');
     try {
       const result = await postAction('add', name, key);
       if(result.ok){
-        await fetchNames();
+        setSyncStatus('저장 완료 ✓');
+        // 서버와 조용히 동기화 (화면 깜빡임 없음)
+        fetchNames(true);
       } else if(result.code === 'DUPLICATE_SAME'){
         alert(`'${name}'님은 이미 명단에 있습니다.`);
+        fetchNames(true); // 서버 상태로 복원
       } else {
-        throw new Error(result.error || '알 수 없는 오류');
+        throw new Error(result.error || '오류');
       }
     } catch(e){
       console.error(e);
+      // 실패 시 로컬 롤백
+      const idx = arr.indexOf(name);
+      if(idx > -1) arr.splice(idx, 1);
+      render();
+      setSyncStatus('저장 실패 ✗');
       alert('신청 중 오류가 발생했습니다. 다시 시도해 주세요.');
     } finally {
-      setBusy(false);
-      hideLoading();
-      input.focus();
+      isBusy = false;
     }
   }
 
-  /* ── 삭제 ── */
+  /* ── 삭제 (Optimistic UI) ── */
   async function removeName(key, name){
     if(isBusy) return;
     if(!confirm(`'${name}'님을 명단에서 삭제하시겠습니까?`)) return;
-    setBusy(true);
-    showLoading();
+
+    const arr = key === 'a' ? namesA : namesB;
+    const idx = arr.indexOf(name);
+
+    // ★ 즉시 화면 반영
+    if(idx > -1) arr.splice(idx, 1);
+    render();
+
+    // 백그라운드 서버 전송
+    isBusy = true;
+    setSyncStatus('삭제 중...');
     try {
       const result = await postAction('remove', name, key);
       if(result.ok){
-        await fetchNames();
+        setSyncStatus('삭제 완료 ✓');
+        fetchNames(true);
       } else {
-        throw new Error(result.error || '알 수 없는 오류');
+        throw new Error(result.error || '오류');
       }
     } catch(e){
       console.error(e);
+      // 실패 시 롤백
+      arr.splice(idx, 0, name);
+      render();
+      setSyncStatus('삭제 실패 ✗');
       alert('삭제 중 오류가 발생했습니다. 다시 시도해 주세요.');
     } finally {
-      setBusy(false);
-      hideLoading();
+      isBusy = false;
     }
   }
 
@@ -556,9 +577,7 @@
   document.getElementById('input-a').addEventListener('keydown', e=>{ if(e.key==='Enter') addName('a'); });
   document.getElementById('input-b').addEventListener('keydown', e=>{ if(e.key==='Enter') addName('b'); });
 
-  /* ── 초기 로드 & 30초 자동 갱신 ── */
+  /* ── 초기 로드 & 60초 자동 갱신 ── */
   fetchNames();
-  setInterval(fetchNames, 30000);
+  setInterval(() => fetchNames(true), 60000);
 </script>
-</body>
-</html>
